@@ -1,99 +1,17 @@
 import ec2 = require('@aws-cdk/aws-ec2');
 import cdk = require('@aws-cdk/cdk');
-import { IClusterParameterGroup } from './cluster-parameter-group';
 import { DatabaseClusterImportProps, Endpoint, IDatabaseCluster } from './cluster-ref';
-import { BackupProps, DatabaseClusterEngine, InstanceProps, Login } from './props';
-import { CfnDBCluster, CfnDBInstance, CfnDBSubnetGroup } from './rds.generated';
+import { BaseClusterProps, DatabaseClusterEngineMode, ProvisionedClusterProps, ServerlessClusterProps } from './props';
+import { CfnDBCluster, CfnDBClusterProps, CfnDBInstance, CfnDBSubnetGroup } from './rds.generated';
 
-/**
- * Properties for a new database cluster
- */
-export interface DatabaseClusterProps {
-  /**
-   * What kind of database to start
-   */
-  engine: DatabaseClusterEngine;
+const defaultServerlessScalingConfiguration: CfnDBCluster.ScalingConfigurationProperty = {
+  autoPause: true,
+  maxCapacity: 8,
+  minCapacity: 2,
+  secondsUntilAutoPause: 300,
+};
 
-  /**
-   * How many replicas/instances to create
-   *
-   * Has to be at least 1.
-   *
-   * @default 2
-   */
-  instances?: number;
-
-  /**
-   * Settings for the individual instances that are launched
-   */
-  instanceProps: InstanceProps;
-
-  /**
-   * Username and password for the administrative user
-   */
-  masterUser: Login;
-
-  /**
-   * Backup settings
-   */
-  backup?: BackupProps;
-
-  /**
-   * What port to listen on
-   *
-   * If not supplied, the default for the engine is used.
-   */
-  port?: number;
-
-  /**
-   * An optional identifier for the cluster
-   *
-   * If not supplied, a name is automatically generated.
-   */
-  clusterIdentifier?: string;
-
-  /**
-   * Base identifier for instances
-   *
-   * Every replica is named by appending the replica number to this string, 1-based.
-   *
-   * If not given, the clusterIdentifier is used with the word "Instance" appended.
-   *
-   * If clusterIdentifier is also not given, the identifier is automatically generated.
-   */
-  instanceIdentifierBase?: string;
-
-  /**
-   * Name of a database which is automatically created inside the cluster
-   */
-  defaultDatabaseName?: string;
-
-  /**
-   * ARN of KMS key if you want to enable storage encryption
-   */
-  kmsKeyArn?: string;
-
-  /**
-   * A daily time range in 24-hours UTC format in which backups preferably execute.
-   *
-   * Must be at least 30 minutes long.
-   *
-   * Example: '01:00-02:00'
-   */
-  preferredMaintenanceWindow?: string;
-
-  /**
-   * Additional parameters to pass to the database engine
-   *
-   * @default No parameter group
-   */
-  parameterGroup?: IClusterParameterGroup;
-}
-
-/**
- * Create a clustered database with a given number of instances.
- */
-export class DatabaseCluster extends cdk.Construct implements IDatabaseCluster {
+export abstract class BaseCluster extends cdk.Construct implements IDatabaseCluster {
   /**
    * Import an existing DatabaseCluster from properties
    */
@@ -136,87 +54,49 @@ export class DatabaseCluster extends cdk.Construct implements IDatabaseCluster {
    */
   public readonly securityGroupId: string;
 
-  constructor(scope: cdk.Construct, id: string, props: DatabaseClusterProps) {
+  /**
+   * Reference to the cloudformation cluster object
+   */
+  protected readonly cluster: CfnDBCluster;
+
+  /**
+   * Reference to the cloudformation subnet group for this cluster
+   */
+  protected readonly subnetGroup: CfnDBSubnetGroup;
+
+  constructor(scope: cdk.Construct, id: string, props: BaseClusterProps) {
     super(scope, id);
 
-    const subnets = props.instanceProps.vpc.subnets(props.instanceProps.vpcPlacement);
+    const subnets = props.vpcProps.vpc.subnets(props.vpcProps.vpcPlacement);
 
     // Cannot test whether the subnets are in different AZs, but at least we can test the amount.
     if (subnets.length < 2) {
       throw new Error(`Cluster requires at least 2 subnets, got ${subnets.length}`);
     }
 
-    const subnetGroup = new CfnDBSubnetGroup(this, 'Subnets', {
+    this.subnetGroup = new CfnDBSubnetGroup(this, 'Subnets', {
       dbSubnetGroupDescription: `Subnets for ${id} database`,
       subnetIds: subnets.map(s => s.subnetId)
     });
 
     const securityGroup = new ec2.SecurityGroup(this, 'SecurityGroup', {
       description: 'RDS security group',
-      vpc: props.instanceProps.vpc
+      vpc: props.vpcProps.vpc
     });
     this.securityGroupId = securityGroup.securityGroupId;
 
-    const cluster = new CfnDBCluster(this, 'Resource', {
-      // Basic
-      engine: props.engine,
-      dbClusterIdentifier: props.clusterIdentifier,
-      dbSubnetGroupName: subnetGroup.ref,
-      vpcSecurityGroupIds: [this.securityGroupId],
-      port: props.port,
-      dbClusterParameterGroupName: props.parameterGroup && props.parameterGroup.parameterGroupName,
-      // Admin
-      masterUsername: props.masterUser.username,
-      masterUserPassword: props.masterUser.password,
-      backupRetentionPeriod: props.backup && props.backup.retentionDays,
-      preferredBackupWindow: props.backup && props.backup.preferredWindow,
-      preferredMaintenanceWindow: props.preferredMaintenanceWindow,
-      databaseName: props.defaultDatabaseName,
-      // Encryption
-      kmsKeyId: props.kmsKeyArn,
-      storageEncrypted: props.kmsKeyArn ? true : false,
-    });
+    const clusterProps = this.getClusterProps(props);
 
-    this.clusterIdentifier = cluster.ref;
-    this.clusterEndpoint = new Endpoint(cluster.dbClusterEndpointAddress, cluster.dbClusterEndpointPort);
-    this.readerEndpoint = new Endpoint(cluster.dbClusterReadEndpointAddress, cluster.dbClusterEndpointPort);
+    this.cluster = new CfnDBCluster(this, 'Resource', clusterProps);
 
-    const instanceCount = props.instances != null ? props.instances : 2;
-    if (instanceCount < 1) {
-      throw new Error('At least one instance is required');
-    }
-
-    for (let i = 0; i < instanceCount; i++) {
-      const instanceIndex = i + 1;
-
-      const instanceIdentifier = props.instanceIdentifierBase != null ? `${props.instanceIdentifierBase}${instanceIndex}` :
-                     props.clusterIdentifier != null ? `${props.clusterIdentifier}instance${instanceIndex}` :
-                     undefined;
-
-      const publiclyAccessible = props.instanceProps.vpcPlacement && props.instanceProps.vpcPlacement.subnetsToUse === ec2.SubnetType.Public;
-
-      const instance = new CfnDBInstance(this, `Instance${instanceIndex}`, {
-        // Link to cluster
-        engine: props.engine,
-        dbClusterIdentifier: cluster.ref,
-        dbInstanceIdentifier: instanceIdentifier,
-        // Instance properties
-        dbInstanceClass: databaseInstanceType(props.instanceProps.instanceType),
-        publiclyAccessible,
-        // This is already set on the Cluster. Unclear to me whether it should be repeated or not. Better yes.
-        dbSubnetGroupName: subnetGroup.ref,
-      });
-
-      // We must have a dependency on the NAT gateway provider here to create
-      // things in the right order.
-      instance.node.addDependency(...subnets.map(s => s.internetConnectivityEstablished));
-
-      this.instanceIdentifiers.push(instance.ref);
-      this.instanceEndpoints.push(new Endpoint(instance.dbInstanceEndpointAddress, instance.dbInstanceEndpointPort));
-    }
+    this.clusterIdentifier = this.cluster.ref;
+    this.clusterEndpoint = new Endpoint(this.cluster.dbClusterEndpointAddress, this.cluster.dbClusterEndpointPort);
+    this.readerEndpoint = new Endpoint(this.cluster.dbClusterReadEndpointAddress, this.cluster.dbClusterEndpointPort);
 
     const defaultPortRange = new ec2.TcpPortFromAttribute(this.clusterEndpoint.port);
     this.connections = new ec2.Connections({ securityGroups: [securityGroup], defaultPortRange });
+
+    this.setupInstances(props);
   }
 
   /**
@@ -234,6 +114,103 @@ export class DatabaseCluster extends cdk.Construct implements IDatabaseCluster {
       instanceEndpointAddresses: new cdk.StringListOutput(this, 'InstanceEndpointAddresses', { values: this.instanceEndpoints.map(e => e.hostname) }).makeImportValues().map(x => x.toString()),
     };
     // tslint:enable:max-line-length
+  }
+
+  protected extraClusterProps(_props: BaseClusterProps): any {
+    return {};
+  }
+
+  protected setupInstances(_props: BaseClusterProps): void {
+    return;
+  }
+
+  private getClusterProps(props: BaseClusterProps): CfnDBClusterProps {
+    return Object.assign({
+      // Basic
+      engine: props.engine,
+      dbClusterIdentifier: props.clusterIdentifier,
+      dbSubnetGroupName: this.subnetGroup.ref,
+      vpcSecurityGroupIds: [this.securityGroupId],
+      port: props.port,
+      dbClusterParameterGroupName: props.parameterGroup && props.parameterGroup.parameterGroupName,
+      // Admin
+      masterUsername: props.masterUser.username,
+      masterUserPassword: props.masterUser.password,
+      backupRetentionPeriod: props.backup && props.backup.retentionDays,
+      preferredBackupWindow: props.backup && props.backup.preferredWindow,
+      preferredMaintenanceWindow: props.preferredMaintenanceWindow,
+      databaseName: props.defaultDatabaseName,
+    }, this.extraClusterProps(props));
+  }
+}
+
+/**
+ * Create a clustered database with a given number of instances.
+ */
+export class DatabaseCluster extends BaseCluster {
+  constructor(scope: cdk.Construct, id: string, props: ProvisionedClusterProps) {
+    super(scope, id, props);
+  }
+
+  protected extraClusterProps(props: ProvisionedClusterProps) {
+    // Configure Encryption
+    return {
+      kmsKeyId: props.kmsKeyArn,
+      storageEncrypted: props.kmsKeyArn ? true : false
+    };
+  }
+
+  protected setupInstances(props: ProvisionedClusterProps) {
+    const instanceCount = props.instances != null ? props.instances : 2;
+    if (instanceCount < 1) {
+      throw new Error('At least one instance is required');
+    }
+
+    for (let i = 0; i < instanceCount; i++) {
+      const instanceIndex = i + 1;
+
+      const instanceIdentifier = props.instanceIdentifierBase != null ? `${props.instanceIdentifierBase}${instanceIndex}` :
+                     props.clusterIdentifier != null ? `${props.clusterIdentifier}instance${instanceIndex}` :
+                     undefined;
+
+      const publiclyAccessible = props.vpcProps.vpcPlacement && props.vpcProps.vpcPlacement.subnetsToUse === ec2.SubnetType.Public;
+
+      const instance = new CfnDBInstance(this, `Instance${instanceIndex}`, {
+        // Link to cluster
+        engine: props.engine,
+        dbClusterIdentifier: this.cluster.ref,
+        dbInstanceIdentifier: instanceIdentifier,
+        // Instance properties
+        dbInstanceClass: databaseInstanceType(props.instanceProps.instanceType),
+        publiclyAccessible,
+        // This is already set on the Cluster. Unclear to me whether it should be repeated or not. Better yes.
+        dbSubnetGroupName: this.subnetGroup.ref,
+      });
+
+      // We must have a dependency on the NAT gateway provider here to create
+      // things in the right order.
+      instance.node.addDependency(...subnets.map(s => s.internetConnectivityEstablished));
+
+      this.instanceIdentifiers.push(instance.ref);
+      this.instanceEndpoints.push(new Endpoint(instance.dbInstanceEndpointAddress, instance.dbInstanceEndpointPort));
+    }
+  }
+}
+
+/**
+ * Create a serverless database cluster
+ */
+export class ServerlessCluster extends BaseCluster {
+  constructor(scope: cdk.Construct, id: string, props: ServerlessClusterProps) {
+    super(scope, id, props);
+  }
+
+  protected extraClusterProps(props: ServerlessClusterProps) {
+    const scalingConfiguration = Object.assign({}, defaultServerlessScalingConfiguration, props.scalingConfiguration);
+    return {
+      engineMode: DatabaseClusterEngineMode.Serverless,
+      scalingConfiguration
+    };
   }
 }
 

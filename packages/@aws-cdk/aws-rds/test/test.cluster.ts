@@ -2,7 +2,7 @@ import { expect, haveResource } from '@aws-cdk/assert';
 import ec2 = require('@aws-cdk/aws-ec2');
 import cdk = require('@aws-cdk/cdk');
 import { Test } from 'nodeunit';
-import { ClusterParameterGroup, DatabaseCluster, DatabaseClusterEngine } from '../lib';
+import { ClusterParameterGroup, DatabaseCluster, DatabaseClusterEngine, ServerlessCluster } from '../lib';
 
 export = {
   'check that instantiation works'(test: Test) {
@@ -17,9 +17,9 @@ export = {
         username: 'admin',
         password: 'tooshort',
       },
+      vpcProps: { vpc },
       instanceProps: {
         instanceType: new ec2.InstanceTypePair(ec2.InstanceClass.Burstable2, ec2.InstanceSize.Small),
-        vpc
       }
     });
 
@@ -34,6 +34,7 @@ export = {
 
     test.done();
   },
+
   'check that exporting/importing works'(test: Test) {
     // GIVEN
     const stack1 = testStack();
@@ -45,9 +46,11 @@ export = {
         username: 'admin',
         password: 'tooshort',
       },
+      vpcProps: {
+        vpc: new ec2.VpcNetwork(stack1, 'VPC')
+      },
       instanceProps: {
         instanceType: new ec2.InstanceTypePair(ec2.InstanceClass.Burstable2, ec2.InstanceSize.Small),
-        vpc: new ec2.VpcNetwork(stack1, 'VPC')
       }
     });
 
@@ -58,6 +61,7 @@ export = {
 
     test.done();
   },
+
   'can create a cluster with a single instance'(test: Test) {
     // GIVEN
     const stack = testStack();
@@ -71,15 +75,43 @@ export = {
         username: 'admin',
         password: 'tooshort',
       },
+      vpcProps: { vpc },
       instanceProps: {
         instanceType: new ec2.InstanceTypePair(ec2.InstanceClass.Burstable2, ec2.InstanceSize.Small),
-        vpc
       }
     });
 
     // THEN
     expect(stack).to(haveResource('AWS::RDS::DBCluster', {
       Engine: "aurora",
+      DBSubnetGroupName: { Ref: "DatabaseSubnets56F17B9A" },
+      MasterUsername: "admin",
+      MasterUserPassword: "tooshort",
+      VpcSecurityGroupIds: [ {"Fn::GetAtt": ["DatabaseSecurityGroup5C91FDCB", "GroupId"]}]
+    }));
+
+    test.done();
+  },
+
+  'can create a serverless cluster'(test: Test) {
+    // GIVEN
+    const stack = testStack();
+    const vpc = new ec2.VpcNetwork(stack, 'VPC');
+
+    // WHEN
+    new ServerlessCluster(stack, 'Database', {
+      engine: DatabaseClusterEngine.Aurora,
+      masterUser: {
+        username: 'admin',
+        password: 'tooshort',
+      },
+      vpcProps: { vpc }
+    });
+
+    // THEN
+    expect(stack).to(haveResource('AWS::RDS::DBCluster', {
+      Engine: "aurora",
+      EngineMode: "serverless",
       DBSubnetGroupName: { Ref: "DatabaseSubnets56F17B9A" },
       MasterUsername: "admin",
       MasterUserPassword: "tooshort",
@@ -110,8 +142,8 @@ export = {
       },
       instanceProps: {
         instanceType: new ec2.InstanceTypePair(ec2.InstanceClass.Burstable2, ec2.InstanceSize.Small),
-        vpc
       },
+      vpcProps: { vpc },
       parameterGroup: group
     });
 
