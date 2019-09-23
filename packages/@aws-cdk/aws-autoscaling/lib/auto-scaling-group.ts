@@ -463,6 +463,25 @@ export class AutoScalingGroup extends AutoScalingGroupBase implements
 
     launchConfig.node.addDependency(this.role);
 
+    const launchTemplate = new ec2.CfnLaunchTemplate(this, 'LaunchTemplate', {
+      launchTemplateData: {
+        imageId: imageConfig.imageId,
+        keyName: props.keyName,
+        instanceType: props.instanceType.toString(),
+        securityGroupIds: securityGroupsToken,
+        iamInstanceProfile: {
+          arn: iamProfile.attrArn
+        },
+        userData: userDataToken,
+        instanceMarketOptions: {
+          marketType: 'spot',
+          spotOptions: {
+            spotInstanceType: 'one-time'
+          }
+        }
+      }
+    });
+
     // desiredCapacity just reflects what the user has supplied.
     const desiredCapacity = props.desiredCapacity;
     const minCapacity = props.minCapacity !== undefined ? props.minCapacity : 1;
@@ -497,7 +516,11 @@ export class AutoScalingGroup extends AutoScalingGroupBase implements
       minSize: Tokenization.stringifyNumber(minCapacity),
       maxSize: Tokenization.stringifyNumber(maxCapacity),
       desiredCapacity: desiredCapacity !== undefined ? Tokenization.stringifyNumber(desiredCapacity) : undefined,
-      launchConfigurationName: launchConfig.ref,
+      // launchConfigurationName: launchConfig.ref,
+      launchTemplate: {
+        launchTemplateId: launchTemplate.ref,
+        version: launchTemplate.attrLatestVersionNumber,
+      },
       loadBalancerNames: Lazy.listValue({ produce: () => this.loadBalancerNames }, { omitEmpty: true }),
       targetGroupArns: Lazy.listValue({ produce: () => this.targetGroupArns }, { omitEmpty: true }),
       notificationConfigurations: !props.notificationsTopic ? undefined : [
