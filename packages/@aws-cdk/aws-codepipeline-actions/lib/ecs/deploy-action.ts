@@ -5,10 +5,7 @@ import { Construct } from '@aws-cdk/core';
 import { Action } from '../action';
 import { deployArtifactBounds } from '../common';
 
-/**
- * Construction properties of {@link EcsDeployAction}.
- */
-export interface EcsDeployActionProps extends codepipeline.CommonAwsActionProps {
+interface BaseEcsDeployActionProps extends codepipeline.CommonAwsActionProps {
   /**
    * The input artifact that contains the JSON image definitions file to use for deployments.
    * The JSON file is a list of objects,
@@ -22,7 +19,6 @@ export interface EcsDeployActionProps extends codepipeline.CommonAwsActionProps 
    * @see https://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-create.html#pipelines-create-image-definitions
    */
   readonly input?: codepipeline.Artifact;
-
   /**
    * The name of the JSON image definitions file to use for deployments.
    * The JSON file is a list of objects,
@@ -35,12 +31,37 @@ export interface EcsDeployActionProps extends codepipeline.CommonAwsActionProps 
    * @see https://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-create.html#pipelines-create-image-definitions
    */
   readonly imageFile?: codepipeline.ArtifactPath;
+}
 
+/**
+ * Construction properties of {@link EcsDeployAction}.
+ */
+export interface EcsDeployActionByServiceProps extends BaseEcsDeployActionProps {
   /**
    * The ECS Service to deploy.
    */
   readonly service: ecs.BaseService;
 }
+
+/**
+ * Construction properties of {@link EcsDeployAction}.
+ */
+export interface EcsDeployActionByNamesProps extends BaseEcsDeployActionProps {
+  /**
+   * Name of the ECS Cluster to deploy to.
+   */
+  readonly clusterName: string;
+
+  /**
+   * Name of the ECS Service to deploy.
+   */
+  readonly serviceName: string;
+}
+
+/**
+ * Construction properties of {@link EcsDeployAction}.
+ */
+export type EcsDeployActionProps = EcsDeployActionByServiceProps | EcsDeployActionByNamesProps;
 
 /**
  * CodePipeline Action to deploy an ECS Service.
@@ -55,9 +76,8 @@ export class EcsDeployAction extends Action {
       provider: 'ECS',
       artifactBounds: deployArtifactBounds(),
       inputs: [determineInputArtifact(props)],
-      resource: props.service
+      resource: ('service' in props) ? props.service : undefined
     });
-
     this.props = props;
   }
 
@@ -92,13 +112,18 @@ export class EcsDeployAction extends Action {
 
     options.bucket.grantRead(options.role);
 
-    return {
-      configuration: {
-        ClusterName: this.props.service.cluster.clusterName,
-        ServiceName: this.props.service.serviceName,
-        FileName: this.props.imageFile && this.props.imageFile.fileName,
-      },
+    const props = this.props;
+    const configuration: any = {
+      FileName: props.imageFile?.fileName,
     };
+    if ('service' in props) {
+      configuration.ClusterName = props.service.cluster.clusterName;
+      configuration.ServiceName = props.service.serviceName;
+    } else {
+      configuration.ClusterName = props.clusterName;
+      configuration.ServiceName = props.serviceName;
+    }
+    return { configuration };
   }
 }
 
